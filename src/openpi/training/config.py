@@ -908,7 +908,7 @@ _CONFIGS = [
             action_dim=7,  # xyz + rpy + gripper
         ),
         data=SfpInsertDataConfig(
-            repo_id="sfp_insert_teleop_v2",
+            repo_id="tshiamor/sfp_insert_teleop_v2",
             base_config=DataConfig(prompt_from_task=True),
         ),
         weight_loader=weight_loaders.Pi0GuidanceWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
