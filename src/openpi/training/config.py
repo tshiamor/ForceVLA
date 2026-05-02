@@ -485,9 +485,9 @@ class LeRobotForcevlaDataConfig(DataConfigFactory):
 
 @dataclasses.dataclass(frozen=True)
 class SfpStateTransform(DataTransformFn):
-    """Transforms SFP insertion dataset state into 13-dim state vector."""
+    """Transforms SFP insertion dataset state into 6-dim state vector."""
     def __call__(self, data: DataDict) -> DataDict:
-        # Concatenate ee_pos (3), ee_quat (4) and wrench (6) to form state (13)
+        # Concatenate ee_pos (3), and wrench (:3) to form state (6)
         # For insertion task: ee_pos + ee_quat + wrench (no gripper, always grasping)
         # ee_pos: (3,) - end effector position
         # ee_quat: (4,) - end effector orientation quaternion
@@ -495,8 +495,9 @@ class SfpStateTransform(DataTransformFn):
         ee_pos = data["ee_pos"]
         ee_quat = data["ee_quat"]
         wrench = data["wrench"]
+        gripper_pos = data.get("gripper_pos", np.zeros(1))
 
-        state = np.concatenate([ee_pos, ee_quat, wrench], axis=-1)
+        state = np.concatenate([ee_pos, wrench[:3], gripper_pos], axis=-1)
         data["state"] = state
         return data
 
@@ -537,7 +538,7 @@ class SfpInsertDataConfig(DataConfigFactory):
 
         # Apply delta actions for all 6 dims (xyz + rpy) since there's no gripper
         # All actions are relative to the first state in each action chunk
-        delta_action_mask = _transforms.make_bool_mask(6)
+        delta_action_mask = _transforms.make_bool_mask(3, -4)  # keep Wrench and gripper as absolute
         data_transforms = data_transforms.push(
             inputs=[_transforms.DeltaActions(delta_action_mask)],
             outputs=[_transforms.AbsoluteActions(delta_action_mask)],
@@ -903,7 +904,7 @@ _CONFIGS = [
         model=pi0_force.Pi0_GuidanceConfig(
             paligemma_variant="gemma_2b_lora",
             action_expert_variant="gemma_300m_lora",
-            action_dim=6,  # xyz + rpy (no gripper for insertion task)
+            action_dim=7,  # xyz + rpy + gripper
         ),
         data=SfpInsertDataConfig(
             repo_id="sfp_insert_teleop_v1",

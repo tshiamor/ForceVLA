@@ -50,7 +50,11 @@ class Forcevla_inputs(transforms.DataTransformFn):
         # since the pi0-FAST action_dim = 7, which is < state_dim = 8, so pad is skipped.
         # Keep this for your own dataset, but if your dataset stores the proprioceptive input
         # in a different key than "observation/state", you should change it below.
-        state = transforms.pad_to_dim(data["state"], self.action_dim)
+        current_state = data["state"]
+        if current_state.shape[-1] > self.action_dim:
+            state = current_state[..., :self.action_dim]
+        else:
+            state = transforms.pad_to_dim(current_state, self.action_dim)
 
         # Possibly need to parse images to uint8 (H,W,C) since LeRobot automatically
         # stores as float32 (C,H,W), gets skipped for policy inference.
@@ -108,6 +112,6 @@ class Forcevla_outputs(transforms.DataTransformFn):
     def __call__(self, data: dict) -> dict:
         # Only return the first N actions -- since we padded actions above to fit the model action
         # dimension, we need to now parse out the correct number of actions in the return dict.
-        # For SFP insertion, we only return the first 6 actions (xyz + rpy, no gripper)
+        # For SFP insertion, we only return the first 6 actions (xyz + rpy + gripper)
         # For your own dataset, replace `7` with the action dimension of your dataset.
-        return {"actions": np.asarray(data["actions"][:, :6])}
+        return {"actions": np.asarray(data["actions"][:, :7])}
