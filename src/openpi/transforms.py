@@ -431,3 +431,21 @@ def _assert_quantile_stats(norm_stats: at.PyTree[NormStats]) -> None:
             raise ValueError(
                 f"quantile stats must be provided if use_quantile_norm is True. Key {k} is missing q01 or q99."
             )
+
+
+@dataclasses.dataclass(frozen=True)
+class UnpadToDim(DataTransformFn):
+    """Unpads an array to the target dimension along the specified axis."""
+
+    target_dim: int
+    axis: int = -1
+
+    def __call__(self, data: DataDict) -> DataDict:
+        if "actions" in data:
+            x = data["actions"]
+            current_dim = x.shape[self.axis]
+            if current_dim > self.target_dim:
+                slc = [slice(None)] * len(x.shape)
+                slc[self.axis] = slice(0, self.target_dim)
+                data["actions"] = x[tuple(slc)]
+        return data

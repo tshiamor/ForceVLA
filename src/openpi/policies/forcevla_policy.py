@@ -2,17 +2,19 @@ import dataclasses
 from typing import ClassVar
 import einops
 import numpy as np
-from openpi import transforms  
+from openpi import transforms
 from openpi.models import model as _model
 
+
 def make_forcevla_example() -> dict:
-    """Creates a random input example compatible with Flexiv config."""
+    """Creates a random input example compatible with SFP insertion config."""
     return {
-        "state": np.ones((14,)),  # observation.state, 7 ee pose, 1 gripper, 6 force
-        "image": np.random.randint(256, size=(480, 640, 3), dtype=np.uint8), 
-        "wrist_image": np.random.randint(256, size=(480, 640, 3), dtype=np.uint8), 
+        "state": np.ones((13,)),  # observation.state: ee_pos (3) + ee_quat (4) + wrench (6)
+        "image": np.random.randint(256, size=(480, 640, 3), dtype=np.uint8),
+        "wrist_image": np.random.randint(256, size=(480, 640, 3), dtype=np.uint8),
         "prompt": "do something",
     }
+
 
 def _parse_image(image) -> np.ndarray:
     image = np.asarray(image)
@@ -59,23 +61,22 @@ class Forcevla_inputs(transforms.DataTransformFn):
         # and two wrist views (left and right). If your dataset does not have a particular type
         # of image, e.g. wrist images, you can comment it out here and replace it with zeros like we do for the
         # right wrist image below.
-        base_image = _parse_image(data["image"])
-        left_wrist_image = _parse_image(data["wrist_image"])
+        center_image = _parse_image(data["center_image"])
+        left_image = _parse_image(data.get("left_image", np.zeros_like(center_image)))
+        right_image = _parse_image(data.get("right_image", np.zeros_like(center_image)))
 
         # Create inputs dict. Do not change the keys in the dict below.
         inputs = {
             "state": state,
             "image": {
-                "base_0_rgb": base_image,
-                "left_wrist_0_rgb": left_wrist_image,
-                # Pad any non-existent images with zero-arrays of the appropriate shape.
-                "right_wrist_0_rgb": np.zeros_like(base_image),
+                "base_0_rgb": center_image,
+                "left_wrist_0_rgb": left_image,
+                "right_wrist_0_rgb": right_image,
             },
             "image_mask": {
                 "base_0_rgb": np.True_,
-                "left_wrist_0_rgb": np.True_,
-                # Mask any non-existent images with False (if ``mask_padding`` is True).
-                "right_wrist_0_rgb": np.False_ if mask_padding else np.True_,
+                "left_wrist_0_rgb": np.True_ if "left_image" in data else np.False_ if mask_padding else np.True_,
+                "right_wrist_0_rgb": np.True_ if "right_image" in data else np.False_ if mask_padding else np.True_,
             },
         }
 
@@ -94,7 +95,8 @@ class Forcevla_inputs(transforms.DataTransformFn):
             inputs["prompt"] = data["prompt"]
 
         return inputs
-    
+
+
 @dataclasses.dataclass(frozen=True)
 class Forcevla_outputs(transforms.DataTransformFn):
     """
@@ -102,9 +104,10 @@ class Forcevla_outputs(transforms.DataTransformFn):
     used for inference only.
     For your own dataset, you can copy this class and modify the action dimension based on the comments below.
     """
+
     def __call__(self, data: dict) -> dict:
         # Only return the first N actions -- since we padded actions above to fit the model action
         # dimension, we need to now parse out the correct number of actions in the return dict.
-        # For forcevla, we only return the first 7 actions (since the rest is padding), xyz  + RPY + gripper
+        # For SFP insertion, we only return the first 6 actions (xyz + rpy, no gripper)
         # For your own dataset, replace `7` with the action dimension of your dataset.
-        return {"actions": np.asarray(data["actions"][:, :7])}
+        return {"actions": np.asarray(data["actions"][:, :6])}

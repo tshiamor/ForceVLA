@@ -7,6 +7,8 @@ import difflib
 import logging
 import pathlib
 from typing import Any, Protocol, TypeAlias
+import numpy as np
+from openpi.transforms import DataDict, DataTransformFn
 
 import etils.epath as epath
 import flax.nnx as nnx
@@ -403,7 +405,7 @@ class RLDSDroidDataConfig(DataConfigFactory):
             action_space=self.action_space,
             filter_dict_path=self.filter_dict_path,
         )
-    
+
 @dataclasses.dataclass(frozen=True)
 class LeRobotForcevlaDataConfig(DataConfigFactory):
     """
@@ -480,6 +482,78 @@ class LeRobotForcevlaDataConfig(DataConfigFactory):
             model_transforms=model_transforms,
             action_sequence_keys=self.action_sequence_keys,
         )
+
+@dataclasses.dataclass(frozen=True)
+class SfpStateTransform(DataTransformFn):
+    """Transforms SFP insertion dataset state into 13-dim state vector."""
+    def __call__(self, data: DataDict) -> DataDict:
+        # Concatenate ee_pos (3), ee_quat (4) and wrench (6) to form state (13)
+        # For insertion task: ee_pos + ee_quat + wrench (no gripper, always grasping)
+        # ee_pos: (3,) - end effector position
+        # ee_quat: (4,) - end effector orientation quaternion
+        # wrench: (6,) - force/torque feedback (critical for insertion)
+        ee_pos = data["ee_pos"]
+        ee_quat = data["ee_quat"]
+        wrench = data["wrench"]
+
+        state = np.concatenate([ee_pos, ee_quat, wrench], axis=-1)
+        data["state"] = state
+        return data
+
+
+@dataclasses.dataclass(frozen=True)
+class SfpInsertDataConfig(DataConfigFactory):
+    """Configuration for the sfp_insert_teleop_v1 dataset."""
+    action_sequence_keys: Sequence[str] = ("action",)
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        repack_transform = _transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "center_image": "observation.images.center",
+                        "left_image": "observation.images.left",
+                        "right_image": "observation.images.right",
+                        "ee_pos": "observation.state.ee_pos",
+                        "ee_quat": "observation.state.ee_quat",
+                        "wrench": "observation.state.wrench",
+                        "actions": "action",
+                    }
+                ),
+                SfpStateTransform(),
+            ]
+        )
+
+        data_transforms = _transforms.Group(
+            inputs=[
+                forcevla_policy.Forcevla_inputs(
+                    action_dim=model_config.action_dim,
+                    model_type=model_config.model_type
+                )
+            ],
+            outputs=[forcevla_policy.Forcevla_outputs()],
+        )
+
+        # Apply delta actions for all 6 dims (xyz + rpy) since there's no gripper
+        # All actions are relative to the first state in each action chunk
+        delta_action_mask = _transforms.make_bool_mask(6)
+        data_transforms = data_transforms.push(
+            inputs=[_transforms.DeltaActions(delta_action_mask)],
+            outputs=[_transforms.AbsoluteActions(delta_action_mask)],
+        )
+
+        model_transforms = ModelTransformFactory()(model_config)
+
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs),
+            repo_id="sfp_insert_teleop_v1",
+            repack_transforms=repack_transform,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+            action_sequence_keys=self.action_sequence_keys,
+        )
+
 
 @dataclasses.dataclass(frozen=True)
 class TrainConfig:
@@ -816,6 +890,26 @@ _CONFIGS = [
         ),
         weight_loader=weight_loaders.Pi0GuidanceWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
         # weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
+        num_train_steps=50_000,
+        freeze_filter=pi0_force.Pi0_GuidanceConfig(
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        ema_decay=None,
+        batch_size=4,
+    ),
+
+    TrainConfig(
+        name="forcevla_sfp_insertion",
+        model=pi0_force.Pi0_GuidanceConfig(
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            action_dim=6,  # xyz + rpy (no gripper for insertion task)
+        ),
+        data=SfpInsertDataConfig(
+            repo_id="sfp_insert_teleop_v1",
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        weight_loader=weight_loaders.Pi0GuidanceWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
         num_train_steps=50_000,
         freeze_filter=pi0_force.Pi0_GuidanceConfig(
             paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
