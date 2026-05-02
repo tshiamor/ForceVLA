@@ -519,6 +519,7 @@ class SfpInsertDataConfig(DataConfigFactory):
                         "ee_pos": "observation.state.ee_pos",
                         "ee_quat": "observation.state.ee_quat",
                         "wrench": "observation.state.wrench",
+                        "gripper_pos": "observation.state.gripper_pos",
                         "actions": "action",
                     }
                 ),
@@ -548,7 +549,7 @@ class SfpInsertDataConfig(DataConfigFactory):
 
         return dataclasses.replace(
             self.create_base_config(assets_dirs),
-            repo_id="sfp_insert_teleop_v1",
+            repo_id=self.repo_id,
             repack_transforms=repack_transform,
             data_transforms=data_transforms,
             model_transforms=model_transforms,
@@ -907,7 +908,7 @@ _CONFIGS = [
             action_dim=7,  # xyz + rpy + gripper
         ),
         data=SfpInsertDataConfig(
-            repo_id="sfp_insert_teleop_v1",
+            repo_id="sfp_insert_teleop_v2",
             base_config=DataConfig(prompt_from_task=True),
         ),
         weight_loader=weight_loaders.Pi0GuidanceWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
