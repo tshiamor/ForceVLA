@@ -521,6 +521,7 @@ class SfpInsertDataConfig(DataConfigFactory):
                         "wrench": "observation.state.wrench",
                         "gripper_pos": "observation.state.gripper_pos",
                         "actions": "action",
+                        "prompt": "prompt",
                     }
                 ),
                 SfpStateTransform(),
