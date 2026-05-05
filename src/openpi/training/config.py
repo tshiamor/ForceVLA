@@ -496,16 +496,17 @@ class SfpStateTransform(DataTransformFn):
       - state[7:13] for force-aware attention via LIMoE
     """
     def __call__(self, data: DataDict) -> DataDict:
-        ee_pos = data["ee_pos"]             # (3,)
-        ee_quat = data["ee_quat"]           # (4,) wxyz
-        wrench = data["wrench"]             # (6,)
-        gripper_pos = data.get("gripper_pos", np.zeros(2))
+        # Convert everything to numpy (may be torch tensors from LeRobot)
+        ee_pos = np.asarray(data["ee_pos"])             # (3,)
+        ee_quat = np.asarray(data["ee_quat"])           # (4,) wxyz
+        wrench = np.asarray(data["wrench"])              # (6,)
+        gripper_pos = np.asarray(data.get("gripper_pos", np.zeros(2)))
 
         # ee_quat wxyz -> take xyz components as orientation (3,)
         ee_ori = ee_quat[1:4] if len(ee_quat) == 4 else ee_quat[:3]
 
         # gripper: use mean of left/right as single scalar
-        grip = np.array([np.mean(gripper_pos)])
+        grip = np.array([float(gripper_pos.mean())])
 
         # 13-dim: ee_pos(3) + ee_ori(3) + gripper(1) + wrench(6)
         state = np.concatenate([ee_pos, ee_ori, grip, wrench], axis=-1)
