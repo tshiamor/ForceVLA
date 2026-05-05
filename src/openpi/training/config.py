@@ -919,6 +919,27 @@ _CONFIGS = [
         ema_decay=None,
         batch_size=4,
     ),
+
+    # All 10 NIC targets (200 episodes, 10 tasks, cuRobo approach)
+    TrainConfig(
+        name="forcevla_sfp_all_nics",
+        model=pi0_force.Pi0_GuidanceConfig(
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            action_dim=7,  # xyz + rpy + gripper
+        ),
+        data=SfpInsertDataConfig(
+            repo_id="tshiamor/sfp_all_nics_curobo_teleop",
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        weight_loader=weight_loaders.Pi0GuidanceWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
+        num_train_steps=100_000,
+        freeze_filter=pi0_force.Pi0_GuidanceConfig(
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        ema_decay=None,
+        batch_size=4,
+    ),
     #
     # Debugging configs.
     #
