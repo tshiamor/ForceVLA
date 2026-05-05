@@ -485,19 +485,30 @@ class LeRobotForcevlaDataConfig(DataConfigFactory):
 
 @dataclasses.dataclass(frozen=True)
 class SfpStateTransform(DataTransformFn):
-    """Transforms SFP insertion dataset state into 6-dim state vector."""
-    def __call__(self, data: DataDict) -> DataDict:
-        # Concatenate ee_pos (3), and wrench (:3) to form state (6)
-        # For insertion task: ee_pos + ee_quat + wrench (no gripper, always grasping)
-        # ee_pos: (3,) - end effector position
-        # ee_quat: (4,) - end effector orientation quaternion
-        # wrench: (6,) - force/torque feedback (critical for insertion)
-        ee_pos = data["ee_pos"]
-        ee_quat = data["ee_quat"]
-        wrench = data["wrench"]
-        gripper_pos = data.get("gripper_pos", np.zeros(1))
+    """Transforms SFP insertion dataset state into 13-dim vector.
 
-        state = np.concatenate([ee_pos, wrench[:3], gripper_pos], axis=-1)
+    Layout (must match pi0_force model expectations):
+      state[:7]  = robot state: ee_pos(3) + ee_quat(3, xyz only) + gripper(1)
+      state[7:13] = wrench: Fx, Fy, Fz, Tx, Ty, Tz (6)
+
+    The model uses:
+      - state[:action_dim] for proprioceptive input (padded to action_dim)
+      - state[7:13] for force-aware attention via LIMoE
+    """
+    def __call__(self, data: DataDict) -> DataDict:
+        ee_pos = data["ee_pos"]             # (3,)
+        ee_quat = data["ee_quat"]           # (4,) wxyz
+        wrench = data["wrench"]             # (6,)
+        gripper_pos = data.get("gripper_pos", np.zeros(2))
+
+        # ee_quat wxyz -> take xyz components as orientation (3,)
+        ee_ori = ee_quat[1:4] if len(ee_quat) == 4 else ee_quat[:3]
+
+        # gripper: use mean of left/right as single scalar
+        grip = np.array([np.mean(gripper_pos)])
+
+        # 13-dim: ee_pos(3) + ee_ori(3) + gripper(1) + wrench(6)
+        state = np.concatenate([ee_pos, ee_ori, grip, wrench], axis=-1)
         data["state"] = state
         return data
 
