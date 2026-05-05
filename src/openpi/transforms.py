@@ -112,6 +112,24 @@ class InjectDefaultPrompt(DataTransformFn):
 
 
 @dataclasses.dataclass(frozen=True)
+class PromptFromLeRobotTask(DataTransformFn):
+    """Extract prompt from LeRobot task metadata using task_index."""
+    tasks: dict  # {task_index: task_description}
+
+    def __call__(self, data: DataDict) -> DataDict:
+        task_index = data.get("task_index", 0)
+        if hasattr(task_index, "item"):
+            task_index = task_index.item()
+        task_index = int(task_index)
+        if task_index in self.tasks:
+            data["prompt"] = self.tasks[task_index]
+        elif "prompt" not in data:
+            # Fallback: use first task
+            data["prompt"] = next(iter(self.tasks.values()), "insert sfp module")
+        return data
+
+
+@dataclasses.dataclass(frozen=True)
 class Normalize(DataTransformFn):
     norm_stats: at.PyTree[NormStats] | None
     # If true, will use quantile normalization. Otherwise, normal z-score normalization will be used.
