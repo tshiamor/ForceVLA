@@ -51,10 +51,14 @@ class Forcevla_inputs(transforms.DataTransformFn):
         # Keep this for your own dataset, but if your dataset stores the proprioceptive input
         # in a different key than "observation/state", you should change it below.
         current_state = data["state"]
-        if current_state.shape[-1] > self.action_dim:
-            state = current_state[..., :self.action_dim]
-        else:
+        # For pi0_force: state must be >= 13 dims (7 proprioceptive + 6 wrench).
+        # Do NOT truncate — the model reads state[:7] for proprioception and
+        # state[7:13] for force/torque. Only pad if smaller than action_dim.
+        if current_state.shape[-1] <= self.action_dim:
             state = transforms.pad_to_dim(current_state, self.action_dim)
+        else:
+            # Keep full state (13-dim for force model)
+            state = current_state
 
         # Possibly need to parse images to uint8 (H,W,C) since LeRobot automatically
         # stores as float32 (C,H,W), gets skipped for policy inference.
