@@ -231,11 +231,10 @@ class Pi0_Guidance(_model.BaseModel):
         input_mask = []
         ar_mask = []
         tokens = []
-        # obs.state is shape [b, 13] (13 = 7 prio + 6 force, ee pose: xyz+rpy, gripper)
-        observations = jnp.zeros_like(obs.state)
-        observations = observations.at[:, :7].set(obs.state[:, :7]) ## robot state, xyz + rpy + gripper
-        state_token = self.state_proj(observations)[:, None, :] # [b, 1, d]
-        # state_token = self.state_proj(obs.state)[:, None, :] # [b, 1, d]
+        # obs.state is shape [b, 13] (13 = 7 prio + 6 force)
+        # state_proj expects 7-dim input (action_dim), force_in_proj expects 6-dim
+        proprio = obs.state[:, :7]  # robot state: xyz + rpy + gripper
+        state_token = self.state_proj(proprio)[:, None, :]  # [b, 1, d]
         tokens.append(state_token)
         input_mask.append(jnp.ones((obs.state.shape[0], 1), dtype=jnp.bool_))
         # image/language inputs do not attend to state or actions
