@@ -550,13 +550,8 @@ class SfpInsertDataConfig(DataConfigFactory):
             outputs=[forcevla_policy.Forcevla_outputs()],
         )
 
-        # Apply delta actions for all 6 dims (xyz + rpy) since there's no gripper
-        # All actions are relative to the first state in each action chunk
-        delta_action_mask = _transforms.make_bool_mask(3, -4)  # keep Wrench and gripper as absolute
-        data_transforms = data_transforms.push(
-            inputs=[_transforms.DeltaActions(delta_action_mask)],
-            outputs=[_transforms.AbsoluteActions(delta_action_mask)],
-        )
+        # SFP dataset actions are already Cartesian deltas from teleop (dx, dy, dz, drx, dry, drz, gripper).
+        # Remove applying DeltaActions/AbsoluteActions
 
         model_transforms = ModelTransformFactory()(model_config)
 
