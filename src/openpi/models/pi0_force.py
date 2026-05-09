@@ -282,8 +282,14 @@ class Pi0_Guidance(_model.BaseModel):
             [prefix_tokens, suffix_tokens], mask=attn_mask, positions=positions
         )
         
-        limoe_out = self.limoe(jnp.concatenate([prefix_out, force_tokens], axis=1)) ## prefix_out is vlm
-        v_t = self.action_out_proj(limoe_out[0][:, -self.action_horizon :] + suffix_out[:, -self.action_horizon :])
+        limoe_input = jnp.concatenate([prefix_out, force_tokens], axis=1)  ## prefix_out is vlm
+        # Pad sequence length to multiple of num_experts (4) so LIMoE grouping works
+        _seq = limoe_input.shape[1]
+        _pad = (-_seq) % 4  # 0 if already divisible
+        if _pad:
+            limoe_input = jnp.pad(limoe_input, ((0, 0), (0, _pad), (0, 0)))
+        limoe_out = self.limoe(limoe_input)
+        v_t = self.action_out_proj(limoe_out[0][:, _seq - self.action_horizon : _seq] + suffix_out[:, -self.action_horizon :])
         return jnp.mean(jnp.square(v_t - u_t), axis=-1)
 
     @override
@@ -335,8 +341,14 @@ class Pi0_Guidance(_model.BaseModel):
             assert prefix_out is None
 
             # Use cached prefix output (prefix_out_fix from initial forward pass)
-            limoe_out = self.limoe(jnp.concatenate([prefix_out_fix, force_tokens], axis=1))
-            v_t = self.action_out_proj(limoe_out[0][:, -self.action_horizon :] + suffix_out[:, -self.action_horizon :])
+            limoe_input = jnp.concatenate([prefix_out_fix, force_tokens], axis=1)
+            # Pad sequence length to multiple of num_experts (4) so LIMoE grouping works
+            _seq = limoe_input.shape[1]
+            _pad = (-_seq) % 4
+            if _pad:
+                limoe_input = jnp.pad(limoe_input, ((0, 0), (0, _pad), (0, 0)))
+            limoe_out = self.limoe(limoe_input)
+            v_t = self.action_out_proj(limoe_out[0][:, _seq - self.action_horizon : _seq] + suffix_out[:, -self.action_horizon :])
             # v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
 
             return x_t + dt * v_t, time + dt

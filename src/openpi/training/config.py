@@ -514,6 +514,70 @@ class SfpStateTransform(DataTransformFn):
         return data
 
 
+class SfpStateTransformPi0(DataTransformFn):
+    """Transforms SFP dataset state into 7-dim vector for vanilla pi0 (no force).
+
+    Layout: ee_pos(3) + ee_ori(3) + gripper(1) = 7 dims.
+    Wrench is excluded — pi0 has no force-aware attention.
+    """
+    def __call__(self, data: DataDict) -> DataDict:
+        ee_pos = np.asarray(data["ee_pos"])
+        ee_quat = np.asarray(data["ee_quat"])
+        gripper_pos = np.asarray(data.get("gripper_pos", np.zeros(2)))
+        ee_ori = ee_quat[1:4] if len(ee_quat) == 4 else ee_quat[:3]
+        grip = np.array([float(gripper_pos.mean())])
+        state = np.concatenate([ee_pos, ee_ori, grip], axis=-1)
+        data["state"] = state
+        return data
+
+
+@dataclasses.dataclass(frozen=True)
+class SfpPi0DataConfig(DataConfigFactory):
+    """SFP dataset config for vanilla pi0 (no force/wrench)."""
+    action_sequence_keys: Sequence[str] = ("action",)
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        repack_transform = _transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "center_image": "observation.images.center",
+                        "left_image": "observation.images.left",
+                        "right_image": "observation.images.right",
+                        "ee_pos": "observation.state.ee_pos",
+                        "ee_quat": "observation.state.ee_quat",
+                        "gripper_pos": "observation.state.gripper_pos",
+                        "actions": "action",
+                        "prompt": "prompt",
+                    }
+                ),
+                SfpStateTransformPi0(),
+            ]
+        )
+
+        data_transforms = _transforms.Group(
+            inputs=[
+                forcevla_policy.Forcevla_inputs(
+                    action_dim=model_config.action_dim,
+                    model_type=model_config.model_type
+                )
+            ],
+            outputs=[forcevla_policy.Forcevla_outputs()],
+        )
+
+        model_transforms = ModelTransformFactory()(model_config)
+
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs),
+            repo_id=self.repo_id,
+            repack_transforms=repack_transform,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+            action_sequence_keys=self.action_sequence_keys,
+        )
+
+
 @dataclasses.dataclass(frozen=True)
 class SfpInsertDataConfig(DataConfigFactory):
     """Configuration for the sfp_insert_teleop_v1 dataset."""
@@ -550,8 +614,8 @@ class SfpInsertDataConfig(DataConfigFactory):
             outputs=[forcevla_policy.Forcevla_outputs()],
         )
 
-        # SFP dataset actions are already Cartesian deltas from teleop (dx, dy, dz, drx, dry, drz, gripper).
-        # Remove applying DeltaActions/AbsoluteActions
+        # NOTE: No DeltaActions/AbsoluteActions — SFP dataset actions are already
+        # Cartesian deltas from teleop, not absolute positions.
 
         model_transforms = ModelTransformFactory()(model_config)
 
@@ -943,6 +1007,26 @@ _CONFIGS = [
         weight_loader=weight_loaders.Pi0GuidanceWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
         num_train_steps=100_000,
         freeze_filter=pi0_force.Pi0_GuidanceConfig(
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        ema_decay=None,
+        batch_size=4,
+    ),
+    # pi0 baseline (no force) on same SFP dataset — for comparison with ForceVLA
+    TrainConfig(
+        name="pi0_sfp_all_nics",
+        model=pi0.Pi0Config(
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            action_dim=7,
+        ),
+        data=SfpPi0DataConfig(
+            repo_id="tshiamor/sfp_all_nics_curobo_teleop",
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
+        num_train_steps=100_000,
+        freeze_filter=pi0.Pi0Config(
             paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
         ).get_freeze_filter(),
         ema_decay=None,
