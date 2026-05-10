@@ -1012,6 +1012,26 @@ _CONFIGS = [
         ema_decay=None,
         batch_size=4,
     ),
+    # Single-target: NIC 0 Port 0 only (20 episodes, for local RTX 5090 training)
+    TrainConfig(
+        name="forcevla_sfp_nic0_port0",
+        model=pi0_force.Pi0_GuidanceConfig(
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            action_dim=7,
+        ),
+        data=SfpInsertDataConfig(
+            repo_id="tshiamor/sfp_nic0_port0_curobo_teleop_v2",
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        weight_loader=weight_loaders.Pi0GuidanceWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
+        num_train_steps=20_000,
+        freeze_filter=pi0_force.Pi0_GuidanceConfig(
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        ema_decay=None,
+        batch_size=4,
+    ),
     # pi0 baseline (no force) on same SFP dataset — for comparison with ForceVLA
     TrainConfig(
         name="pi0_sfp_all_nics",
