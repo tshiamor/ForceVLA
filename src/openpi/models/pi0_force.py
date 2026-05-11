@@ -184,12 +184,14 @@ class Pi0_Guidance(_model.BaseModel):
         # )
         self.action_out_proj = nnx.Linear(action_expert_config.width, config.action_dim, rngs=rngs)
         self.force_in_proj = nnx.Linear(6, paligemma_config.width, rngs=rngs)
-        # Joint state projection (only used when config.use_joint_state=True).
-        # Always create the layer so the module structure is consistent, but only
-        # consume it conditionally in embed_suffix. Joint state is 12-dim
-        # (joint_pos 6 + joint_vel 6).
-        self.joint_in_proj = nnx.Linear(12, action_expert_config.width, rngs=rngs)
+        # Joint state projection — created ONLY when use_joint_state=True so
+        # the module's params pytree stays structurally compatible with the
+        # pretrained pi0_base checkpoint (which doesn't have joint_in_proj).
+        # train.py's check_pytree_equality is strict about key sets, so a
+        # forever-present joint_in_proj would break non-joint configs.
         self._use_joint_state = config.use_joint_state
+        if config.use_joint_state:
+            self.joint_in_proj = nnx.Linear(12, action_expert_config.width, rngs=rngs)
         print("paligemma_config.width: ", paligemma_config.width)
         self.limoe = nnx_bridge.ToNNX(
             _limoe.LIMoEBlock(
