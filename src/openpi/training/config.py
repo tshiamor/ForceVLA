@@ -485,31 +485,42 @@ class LeRobotForcevlaDataConfig(DataConfigFactory):
 
 @dataclasses.dataclass(frozen=True)
 class SfpStateTransform(DataTransformFn):
-    """Transforms SFP insertion dataset state into 13-dim vector.
+    """Transforms SFP insertion dataset state into 13-dim or 25-dim vector.
 
     Layout (must match pi0_force model expectations):
-      state[:7]  = robot state: ee_pos(3) + ee_quat(3, xyz only) + gripper(1)
+      state[:7]   = robot state: ee_pos(3) + ee_quat(3, xyz only) + gripper(1)
       state[7:13] = wrench: Fx, Fy, Fz, Tx, Ty, Tz (6)
+      state[13:25] = joint state (only when include_joints=True):
+                      joint_pos(6) + joint_vel(6)
 
     The model uses:
-      - state[:action_dim] for proprioceptive input (padded to action_dim)
-      - state[7:13] for force-aware attention via LIMoE
+      - state[:7]    for proprioceptive input via state_proj
+      - state[7:13]  for force-aware attention via LIMoE / force_in_proj
+      - state[13:25] for joint context via joint_in_proj (when enabled)
+
+    Putting joints AFTER wrench keeps the original [:7] and [7:13] slices
+    backward-compatible — existing checkpoints / configs without joint
+    support still see the same proprio + wrench tensors.
     """
+    include_joints: bool = False
+
     def __call__(self, data: DataDict) -> DataDict:
         # Convert everything to numpy (may be torch tensors from LeRobot)
-        ee_pos = np.asarray(data["ee_pos"])             # (3,)
-        ee_quat = np.asarray(data["ee_quat"])           # (4,) wxyz
+        ee_pos = np.asarray(data["ee_pos"])              # (3,)
+        ee_quat = np.asarray(data["ee_quat"])            # (4,) wxyz
         wrench = np.asarray(data["wrench"])              # (6,)
         gripper_pos = np.asarray(data.get("gripper_pos", np.zeros(2)))
 
-        # ee_quat wxyz -> take xyz components as orientation (3,)
         ee_ori = ee_quat[1:4] if len(ee_quat) == 4 else ee_quat[:3]
-
-        # gripper: use mean of left/right as single scalar
         grip = np.array([float(gripper_pos.mean())])
 
-        # 13-dim: ee_pos(3) + ee_ori(3) + gripper(1) + wrench(6)
-        state = np.concatenate([ee_pos, ee_ori, grip, wrench], axis=-1)
+        parts = [ee_pos, ee_ori, grip, wrench]
+        if self.include_joints:
+            joint_pos = np.asarray(data["joint_pos"])    # (6,)
+            joint_vel = np.asarray(data["joint_vel"])    # (6,)
+            parts += [joint_pos, joint_vel]
+
+        state = np.concatenate(parts, axis=-1)
         data["state"] = state
         return data
 
@@ -580,27 +591,35 @@ class SfpPi0DataConfig(DataConfigFactory):
 
 @dataclasses.dataclass(frozen=True)
 class SfpInsertDataConfig(DataConfigFactory):
-    """Configuration for the sfp_insert_teleop_v1 dataset."""
+    """Configuration for the SFP insertion datasets (with or without joints).
+
+    When include_joints=True, observation.state.{joint_pos,joint_vel} are piped
+    through into the state vector. Requires use_joint_state=True on the model
+    config so the model creates a matching joint_in_proj layer.
+    """
     action_sequence_keys: Sequence[str] = ("action",)
+    include_joints: bool = False
 
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        repack_map = {
+            "center_image": "observation.images.center",
+            "left_image": "observation.images.left",
+            "right_image": "observation.images.right",
+            "ee_pos": "observation.state.ee_pos",
+            "ee_quat": "observation.state.ee_quat",
+            "wrench": "observation.state.wrench",
+            "gripper_pos": "observation.state.gripper_pos",
+            "actions": "action",
+            "prompt": "prompt",
+        }
+        if self.include_joints:
+            repack_map["joint_pos"] = "observation.state.joint_pos"
+            repack_map["joint_vel"] = "observation.state.joint_vel"
         repack_transform = _transforms.Group(
             inputs=[
-                _transforms.RepackTransform(
-                    {
-                        "center_image": "observation.images.center",
-                        "left_image": "observation.images.left",
-                        "right_image": "observation.images.right",
-                        "ee_pos": "observation.state.ee_pos",
-                        "ee_quat": "observation.state.ee_quat",
-                        "wrench": "observation.state.wrench",
-                        "gripper_pos": "observation.state.gripper_pos",
-                        "actions": "action",
-                        "prompt": "prompt",
-                    }
-                ),
-                SfpStateTransform(),
+                _transforms.RepackTransform(repack_map),
+                SfpStateTransform(include_joints=self.include_joints),
             ]
         )
 
@@ -1012,6 +1031,33 @@ _CONFIGS = [
         ema_decay=None,
         batch_size=4,
     ),
+    # Same as forcevla_sfp_all_nics but with joint state added to model input.
+    # State becomes 25-dim: ee_pos(3) + ee_ori(3) + gripper(1) + wrench(6) +
+    # joint_pos(6) + joint_vel(6). Adds a joint_in_proj layer in the model
+    # whose output enters the suffix as an extra state token.
+    # Existing pi0_base weights don't have joint_in_proj; the new layer is
+    # randomly initialised and trained from scratch.
+    TrainConfig(
+        name="forcevla_sfp_all_nics_joints",
+        model=pi0_force.Pi0_GuidanceConfig(
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            action_dim=7,
+            use_joint_state=True,
+        ),
+        data=SfpInsertDataConfig(
+            repo_id="tshiamor/sfp_all_nics_curobo_teleop_v2",
+            base_config=DataConfig(prompt_from_task=True),
+            include_joints=True,
+        ),
+        weight_loader=weight_loaders.Pi0GuidanceWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
+        num_train_steps=100_000,
+        freeze_filter=pi0_force.Pi0_GuidanceConfig(
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        ema_decay=None,
+        batch_size=4,
+    ),
     # Single-target: NIC 0 Port 0 only (20 episodes, for local RTX 5090 training)
     TrainConfig(
         name="forcevla_sfp_nic0_port0",
@@ -1023,6 +1069,29 @@ _CONFIGS = [
         data=SfpInsertDataConfig(
             repo_id="tshiamor/sfp_nic0_port0_curobo_teleop_v2",
             base_config=DataConfig(prompt_from_task=True),
+        ),
+        weight_loader=weight_loaders.Pi0GuidanceWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
+        num_train_steps=20_000,
+        freeze_filter=pi0_force.Pi0_GuidanceConfig(
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        ema_decay=None,
+        batch_size=4,
+    ),
+    # Single-target + joint state — smallest experiment for verifying the
+    # joint-state pathway end to end.
+    TrainConfig(
+        name="forcevla_sfp_nic0_port0_joints",
+        model=pi0_force.Pi0_GuidanceConfig(
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            action_dim=7,
+            use_joint_state=True,
+        ),
+        data=SfpInsertDataConfig(
+            repo_id="tshiamor/sfp_nic0_port0_curobo_teleop_v2",
+            base_config=DataConfig(prompt_from_task=True),
+            include_joints=True,
         ),
         weight_loader=weight_loaders.Pi0GuidanceWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
         num_train_steps=20_000,

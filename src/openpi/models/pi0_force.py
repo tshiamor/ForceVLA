@@ -76,6 +76,12 @@ class Pi0_GuidanceConfig(_model.BaseModelConfig):
     action_horizon: int = 50
     max_token_len: int = 48
 
+    # When True, the model expects state >= 25-dim with joint state at indices
+    # 13..25 ([joint_pos(6), joint_vel(6)]) and creates a joint_in_proj layer
+    # whose output is added as an extra state token. Existing 13-dim
+    # (proprio + wrench) configs leave this False — no architectural change.
+    use_joint_state: bool = False
+
     @property
     @override
     def model_type(self) -> _model.ModelType:
@@ -178,6 +184,12 @@ class Pi0_Guidance(_model.BaseModel):
         # )
         self.action_out_proj = nnx.Linear(action_expert_config.width, config.action_dim, rngs=rngs)
         self.force_in_proj = nnx.Linear(6, paligemma_config.width, rngs=rngs)
+        # Joint state projection (only used when config.use_joint_state=True).
+        # Always create the layer so the module structure is consistent, but only
+        # consume it conditionally in embed_suffix. Joint state is 12-dim
+        # (joint_pos 6 + joint_vel 6).
+        self.joint_in_proj = nnx.Linear(12, action_expert_config.width, rngs=rngs)
+        self._use_joint_state = config.use_joint_state
         print("paligemma_config.width: ", paligemma_config.width)
         self.limoe = nnx_bridge.ToNNX(
             _limoe.LIMoEBlock(
@@ -231,14 +243,25 @@ class Pi0_Guidance(_model.BaseModel):
         input_mask = []
         ar_mask = []
         tokens = []
-        # obs.state is shape [b, 13] (13 = 7 prio + 6 force)
-        # state_proj expects 7-dim input (action_dim), force_in_proj expects 6-dim
-        proprio = obs.state[:, :7]  # robot state: xyz + rpy + gripper
+        # obs.state layout:
+        #   [:7]   proprio = ee_pos(3) + ee_ori(3) + gripper(1)
+        #   [7:13] wrench  = Fx, Fy, Fz, Tx, Ty, Tz
+        #   [13:25] joints = joint_pos(6) + joint_vel(6)   (only if use_joint_state=True)
+        proprio = obs.state[:, :7]
         state_token = self.state_proj(proprio)[:, None, :]  # [b, 1, d]
         tokens.append(state_token)
         input_mask.append(jnp.ones((obs.state.shape[0], 1), dtype=jnp.bool_))
-        # image/language inputs do not attend to state or actions
         ar_mask += [True]
+
+        # Optional joint-state token. Adds 1 extra token to the suffix.
+        # Putting it adjacent to the proprio token keeps the AR mask simple and
+        # lets attention freely mix proprio + joint context.
+        if self._use_joint_state:
+            joint_state = obs.state[:, 13:25]  # (b, 12)
+            joint_token = self.joint_in_proj(joint_state)[:, None, :]
+            tokens.append(joint_token)
+            input_mask.append(jnp.ones((obs.state.shape[0], 1), dtype=jnp.bool_))
+            ar_mask += [True]
         # embed timestep using sine-cosine positional encoding with sensitivity in the range [0, 1]
         time_emb = posemb_sincos(timestep, self.action_in_proj.out_features, min_period=4e-3, max_period=4.0)
         # mix timestep + action information using an MLP

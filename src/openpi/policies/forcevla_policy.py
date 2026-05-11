@@ -6,10 +6,14 @@ from openpi import transforms
 from openpi.models import model as _model
 
 
-def make_forcevla_example() -> dict:
-    """Creates a random input example compatible with SFP insertion config."""
+def make_forcevla_example(state_dim: int = 13) -> dict:
+    """Creates a random input example compatible with SFP insertion config.
+
+    state_dim=13 — default, force-aware variant: ee_pos(3) + ee_ori(3) + gripper(1) + wrench(6).
+    state_dim=25 — force + joint variant:        prior 13 + joint_pos(6) + joint_vel(6).
+    """
     return {
-        "state": np.ones((13,)),  # observation.state: ee_pos (3) + ee_quat (4) + wrench (6)
+        "state": np.ones((state_dim,)),
         "image": np.random.randint(256, size=(480, 640, 3), dtype=np.uint8),
         "wrist_image": np.random.randint(256, size=(480, 640, 3), dtype=np.uint8),
         "prompt": "do something",
