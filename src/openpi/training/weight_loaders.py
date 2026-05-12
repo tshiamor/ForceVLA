@@ -88,8 +88,11 @@ class Pi0GuidanceWeightLoader(WeightLoader):
     def load(self, params: at.Params) -> at.Params:
         # We are loading np.ndarray and relying on the training code to properly convert and shard the params.
         loaded_params = _model.restore_params(download.maybe_download(self.params_path), restore_type=np.ndarray)
-        # Add all missing LoRA weights.
-        return _merge_params(loaded_params, params, missing_regex=".*lora.*|.*limoe.*|.*force.*")
+        # Add all missing weights (LoRA, LIMoE / force_in_proj, and the
+        # optional joint_in_proj head used when use_joint_state=True). These
+        # layers don't exist in pi0_base and must fall back to random init
+        # from the reference model.
+        return _merge_params(loaded_params, params, missing_regex=".*lora.*|.*limoe.*|.*force.*|.*joint.*")
 
 
 def _merge_params(loaded_params: at.Params, params: at.Params, *, missing_regex: str) -> at.Params:

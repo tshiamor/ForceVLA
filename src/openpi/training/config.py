@@ -483,24 +483,51 @@ class LeRobotForcevlaDataConfig(DataConfigFactory):
             action_sequence_keys=self.action_sequence_keys,
         )
 
+def _quat_to_axis_angle(q: np.ndarray) -> np.ndarray:
+    """Convert a unit quaternion (w, x, y, z) to a 3-dim axis-angle vector.
+
+    Returns axis * angle ∈ R^3 with |axis*angle| ∈ [0, π]. Bijective with SO(3)
+    (modulo the boundary at θ=π). Unlike `q[1:4]`, this preserves the full
+    rotation — including the sign of the rotation around its axis — by
+    canonicalizing q so that w >= 0 before extracting the axis.
+    """
+    q = np.asarray(q, dtype=np.float32).reshape(-1)
+    w = float(q[0])
+    xyz = q[1:4].astype(np.float32)
+    # Canonicalize: q and -q encode the same rotation, but yield different
+    # axis-angle vectors. Flipping to w>=0 picks a single canonical form.
+    if w < 0.0:
+        w = -w
+        xyz = -xyz
+    w = float(np.clip(w, -1.0, 1.0))
+    sin_half = float(np.sqrt(max(1.0 - w * w, 0.0)))
+    if sin_half < 1e-8:
+        # Near-identity rotation: axis is undefined, vector is ~0.
+        return np.zeros(3, dtype=np.float32)
+    angle = 2.0 * float(np.arccos(w))
+    axis = xyz / sin_half
+    return (axis * angle).astype(np.float32)
+
+
 @dataclasses.dataclass(frozen=True)
 class SfpStateTransform(DataTransformFn):
     """Transforms SFP insertion dataset state into 13-dim or 25-dim vector.
 
     Layout (must match pi0_force model expectations):
-      state[:7]   = robot state: ee_pos(3) + ee_quat(3, xyz only) + gripper(1)
+      state[:7]   = robot state: ee_pos(3) + axis_angle(3) + gripper(1)
       state[7:13] = wrench: Fx, Fy, Fz, Tx, Ty, Tz (6)
       state[13:25] = joint state (only when include_joints=True):
                       joint_pos(6) + joint_vel(6)
+
+    Rotation is encoded as axis-angle (3-dim, lossless) rather than the
+    legacy `ee_quat[1:4]` which silently dropped the w component and was
+    not a bijection with SO(3) (q and -q gave different vectors). Norm
+    stats MUST be recomputed when switching from the legacy form.
 
     The model uses:
       - state[:7]    for proprioceptive input via state_proj
       - state[7:13]  for force-aware attention via LIMoE / force_in_proj
       - state[13:25] for joint context via joint_in_proj (when enabled)
-
-    Putting joints AFTER wrench keeps the original [:7] and [7:13] slices
-    backward-compatible — existing checkpoints / configs without joint
-    support still see the same proprio + wrench tensors.
     """
     include_joints: bool = False
 
@@ -511,7 +538,7 @@ class SfpStateTransform(DataTransformFn):
         wrench = np.asarray(data["wrench"])              # (6,)
         gripper_pos = np.asarray(data.get("gripper_pos", np.zeros(2)))
 
-        ee_ori = ee_quat[1:4] if len(ee_quat) == 4 else ee_quat[:3]
+        ee_ori = _quat_to_axis_angle(ee_quat)            # (3,) lossless
         grip = np.array([float(gripper_pos.mean())])
 
         parts = [ee_pos, ee_ori, grip, wrench]
@@ -1020,7 +1047,7 @@ _CONFIGS = [
             action_dim=7,  # xyz + rpy + gripper
         ),
         data=SfpInsertDataConfig(
-            repo_id="tshiamor/sfp_all_nics_curobo_teleop_v2",
+            repo_id="tshiamor/sfp_all_nics_v21_clean",
             base_config=DataConfig(prompt_from_task=True),
         ),
         weight_loader=weight_loaders.Pi0GuidanceWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
@@ -1046,7 +1073,7 @@ _CONFIGS = [
             use_joint_state=True,
         ),
         data=SfpInsertDataConfig(
-            repo_id="tshiamor/sfp_all_nics_curobo_teleop_v2",
+            repo_id="tshiamor/sfp_all_nics_v21_clean",
             base_config=DataConfig(prompt_from_task=True),
             include_joints=True,
         ),
@@ -1110,7 +1137,7 @@ _CONFIGS = [
             action_dim=7,
         ),
         data=SfpPi0DataConfig(
-            repo_id="tshiamor/sfp_all_nics_curobo_teleop_v2",
+            repo_id="tshiamor/sfp_all_nics_v21_clean",
             base_config=DataConfig(prompt_from_task=True),
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),

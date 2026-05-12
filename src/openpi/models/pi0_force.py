@@ -246,9 +246,11 @@ class Pi0_Guidance(_model.BaseModel):
         ar_mask = []
         tokens = []
         # obs.state layout:
-        #   [:7]   proprio = ee_pos(3) + ee_ori(3) + gripper(1)
+        #   [:7]   proprio = ee_pos(3) + axis_angle(3) + gripper(1)
         #   [7:13] wrench  = Fx, Fy, Fz, Tx, Ty, Tz
         #   [13:25] joints = joint_pos(6) + joint_vel(6)   (only if use_joint_state=True)
+        # Rotation is axis-angle (3-dim, lossless SO(3) representation); was
+        # previously `ee_quat[1:4]` which silently dropped the w component.
         proprio = obs.state[:, :7]
         state_token = self.state_proj(proprio)[:, None, :]  # [b, 1, d]
         tokens.append(state_token)
