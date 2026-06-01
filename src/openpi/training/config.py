@@ -1128,6 +1128,66 @@ _CONFIGS = [
         ema_decay=None,
         batch_size=4,
     ),
+    # sfp_sc_data24: 21 episodes ground-truth CheatCode data, 3 cameras, 3 tasks
+    TrainConfig(
+        name="forcevla_sfp_sc_data24",
+        model=pi0_force.Pi0_GuidanceConfig(
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            action_dim=7,
+        ),
+        data=SfpInsertDataConfig(
+            repo_id="tshiamor/sfp_sc_data24",
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        weight_loader=weight_loaders.Pi0GuidanceWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
+        num_train_steps=20_000,
+        freeze_filter=pi0_force.Pi0_GuidanceConfig(
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        ema_decay=None,
+        batch_size=4,
+    ),
+    # sfp_all_trimmed: 475 episodes ground-truth CheatCode data, 10 SFP tasks
+    TrainConfig(
+        name="forcevla_sfp_all_trimmed",
+        model=pi0_force.Pi0_GuidanceConfig(
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            action_dim=7,
+        ),
+        data=SfpInsertDataConfig(
+            repo_id="tshiamor/aic_gt_sfp_all_trimmed",
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        weight_loader=weight_loaders.Pi0GuidanceWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
+        num_train_steps=50_000,
+        freeze_filter=pi0_force.Pi0_GuidanceConfig(
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        ema_decay=None,
+        batch_size=4,
+    ),
+    # sfp_all_trimmed_v2: same 475 episodes but with orientation deltas in action[3:5]
+    TrainConfig(
+        name="forcevla_sfp_all_trimmed_v2",
+        model=pi0_force.Pi0_GuidanceConfig(
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            action_dim=7,
+        ),
+        data=SfpInsertDataConfig(
+            repo_id="tshiamor/aic_gt_sfp_all_trimmed_v2",
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        weight_loader=weight_loaders.Pi0GuidanceWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
+        num_train_steps=50_000,
+        freeze_filter=pi0_force.Pi0_GuidanceConfig(
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        ema_decay=None,
+        batch_size=4,
+    ),
     # pi0 baseline (no force) on same SFP dataset — for comparison with ForceVLA
     TrainConfig(
         name="pi0_sfp_all_nics",
