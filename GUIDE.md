@@ -57,6 +57,22 @@ ForceVLA extends pi0 (Physical Intelligence's flow-matching VLA) with force/torq
 
 LoRA fine-tuning is recommended: trains ~5% of parameters while keeping backbone frozen.
 
+### Joint State Extension (`use_joint_state=True`)
+
+When `use_joint_state=True`, the model creates an additional `joint_in_proj` linear layer (12→1024) that projects `[joint_pos(6), joint_vel(6)]` into an extra suffix token for the action expert. This gives the model direct access to joint-level kinematics alongside the Cartesian state.
+
+```
+                                 ┌────────────────────┐
+  ┌──────────┐                   │  Gemma 300M        │
+  │ Joint    │──joint_in_proj───▶│  (Action Expert)   │  ← extra suffix token
+  │ State    │    (12→1024)      │                    │
+  │ (12-dim) │                   └────────────────────┘
+  └──────────┘
+  joint_pos(6) + joint_vel(6)
+```
+
+The `joint_in_proj` layer is randomly initialized (not present in the pi0_base checkpoint) and trained from scratch alongside LoRA adapters and LIMoE.
+
 ## Data Format
 
 ForceVLA uses LeRobot v2.1 datasets. Structure:
@@ -93,9 +109,17 @@ my_dataset/
 | `observation.images.left` | video | Left camera |
 | `observation.images.right` | video | Right camera |
 
-Optional (with `use_joint_state=True`):
-| `observation.state.joint_pos` | (6,) | Joint angles |
-| `observation.state.joint_vel` | (6,) | Joint velocities |
+Optional (with `use_joint_state=True` and `include_joints=True`):
+
+| Column | Shape | Description |
+|--------|-------|-------------|
+| `observation.state.joint_pos` | (6,) | Joint angles (radians) |
+| `observation.state.joint_vel` | (6,) | Joint velocities (rad/s) |
+
+If your dataset has `joint_pos` but not `joint_vel`, compute it offline via finite differences:
+```python
+joint_vel[t] = (joint_pos[t] - joint_pos[t-1]) * FPS  # e.g., FPS=20
+```
 
 ### meta/info.json
 
@@ -138,6 +162,24 @@ Optional (with `use_joint_state=True`):
 {"episode_index": 0, "task_index": 0, "length": 580}
 {"episode_index": 1, "task_index": 1, "length": 580}
 ```
+
+### SFP Insertion Dataset Versions
+
+Three dataset versions exist for SFP cable insertion, each fixing an issue:
+
+| Version | Dataset | State | Actions | HuggingFace |
+|---------|---------|-------|---------|-------------|
+| v1 | `aic_gt_sfp_all_trimmed` | 13D (no joints) | `action[3:5]=0` (no rotation) | [tshiamor/aic_gt_sfp_all_trimmed](https://huggingface.co/datasets/tshiamor/aic_gt_sfp_all_trimmed) |
+| v2 | `aic_gt_sfp_all_trimmed_v2` | 13D (no joints) | Orientation deltas from ee_quat | [tshiamor/aic_gt_sfp_all_trimmed_v2](https://huggingface.co/datasets/tshiamor/aic_gt_sfp_all_trimmed_v2) |
+| v3 | `aic_gt_sfp_all_trimmed_v3` | 25D (with joints) | Same as v2 + joint_vel added | [tshiamor/aic_gt_sfp_all_trimmed_v3](https://huggingface.co/datasets/tshiamor/aic_gt_sfp_all_trimmed_v3) |
+
+All three share the same 475 episodes, 275,500 frames, 10 SFP tasks, and 3 cameras. The differences are in which observation and action fields are populated.
+
+**v1 failure**: `RecordCheatCode.py` hardcoded `np.zeros(3)` for rotation actions. The model could never learn the ~21-degree pitch alignment needed for insertion, and norm_stats had `std=0` for those channels — collapsing them permanently to zero at inference via denormalization.
+
+**v2 fix**: Computed axis-angle rotation deltas offline from consecutive `ee_quat` values: `delta = (R_{t-1}^{-1} * R_t).as_rotvec()`. No re-collection needed.
+
+**v3 addition**: Added `observation.state.joint_vel` via finite differences: `vel[t] = (pos[t] - pos[t-1]) * FPS`. Enables `use_joint_state=True` for joint-aware training.
 
 ### Parquet Gotchas
 
@@ -328,6 +370,54 @@ actions = x                              # t=0, denoised actions
 | Image augmentation | Random crop (95%), resize, rotation (+-5 deg), color jitter |
 | LoRA rank | 16 (VLM), 32 (action expert) |
 
+### SFP Insertion Training Configs
+
+Three pre-defined configs for SFP insertion, matching the dataset versions:
+
+| Config | Dataset | State | Key Flags | Model |
+|--------|---------|-------|-----------|-------|
+| `forcevla_sfp_all_trimmed` | v1 | 13D | (default) | [tshiamor/forcevla-sfp-all-trimmed](https://huggingface.co/tshiamor/forcevla-sfp-all-trimmed) |
+| `forcevla_sfp_all_trimmed_v2` | v2 | 13D | (default) | [tshiamor/forcevla-sfp-all-trimmed-v2](https://huggingface.co/tshiamor/forcevla-sfp-all-trimmed-v2) |
+| `forcevla_sfp_all_trimmed_v3` | v3 | 25D | `use_joint_state=True`, `include_joints=True` | -- |
+
+The v3 config differs from v2 in two flags:
+
+```python
+# v2 (no joints — 13D state)
+TrainConfig(
+    name="forcevla_sfp_all_trimmed_v2",
+    model=pi0_force.Pi0_GuidanceConfig(
+        paligemma_variant="gemma_2b_lora",
+        action_expert_variant="gemma_300m_lora",
+        action_dim=7,
+    ),
+    data=SfpInsertDataConfig(
+        repo_id="tshiamor/aic_gt_sfp_all_trimmed_v2",
+        base_config=DataConfig(prompt_from_task=True),
+    ),
+    ...
+)
+
+# v3 (with joints — 25D state)
+TrainConfig(
+    name="forcevla_sfp_all_trimmed_v3",
+    model=pi0_force.Pi0_GuidanceConfig(
+        paligemma_variant="gemma_2b_lora",
+        action_expert_variant="gemma_300m_lora",
+        action_dim=7,
+        use_joint_state=True,           # <-- creates joint_in_proj layer
+    ),
+    data=SfpInsertDataConfig(
+        repo_id="tshiamor/aic_gt_sfp_all_trimmed_v3",
+        base_config=DataConfig(prompt_from_task=True),
+        include_joints=True,            # <-- adds joint_pos/joint_vel to repack + state
+    ),
+    ...
+)
+```
+
+`use_joint_state=True` on the model and `include_joints=True` on the data config must both be set. The model flag creates the `joint_in_proj` projection layer; the data flag adds `joint_pos` and `joint_vel` to the repack transform and state assembly.
+
 ### Training Tips
 
 - **VRAM**: LoRA fine-tuning uses ~22 GB on RTX 5090. Reduce batch_size if OOM.
@@ -448,6 +538,67 @@ LIMoE's MoE router requires `sequence_length % num_experts == 0`. At batch_size=
 
 Both fixes are required for any ForceVLA inference deployment.
 
+## Inference with Joint State Models (v3)
+
+When serving a v3 model (trained with `use_joint_state=True`), the server expects a 25D state vector instead of 13D. The client must send joint_pos and joint_vel alongside the standard state.
+
+### Serving
+
+```bash
+cd ~/ForceVLA && conda activate forcevla_eval
+python scripts/serve_policy.py policy:checkpoint \
+    --policy.config forcevla_sfp_all_trimmed_v3 \
+    --policy.dir checkpoints/forcevla_sfp_all_trimmed_v3/v3/49999
+```
+
+### Client State Vector
+
+The client must build a 25D state (not 13D):
+
+```python
+state = np.concatenate([
+    ee_pos,         # (3,) TCP position
+    axis_angle,     # (3,) from quaternion
+    gripper,        # (1,) mean of finger joints
+    wrench,         # (6,) force/torque
+    joint_pos,      # (6,) joint angles
+    joint_vel,      # (6,) joint velocities
+])  # total: 25D
+```
+
+If the client sends 13D to a 25D server, normalization will fail with:
+```
+ValueError: operands could not be broadcast together with shapes (13,) (25,)
+```
+
+### AIC RunForceVLA Policy
+
+The `RunForceVLA` ROS policy supports both modes via the `FORCEVLA_USE_JOINTS` environment variable:
+
+```bash
+# v2 model (13D state, no joints) — default
+pixi run ros2 run aic_model aic_model --ros-args \
+    -p use_sim_time:=true -p policy:=aic_example_policies.ros.RunForceVLA
+
+# v3 model (25D state, with joints)
+FORCEVLA_USE_JOINTS=1 pixi run ros2 run aic_model aic_model --ros-args \
+    -p use_sim_time:=true -p policy:=aic_example_policies.ros.RunForceVLA
+```
+
+When `FORCEVLA_USE_JOINTS=1`:
+- `joint_pos` is read from `obs.joint_states.position[:6]`
+- `joint_vel` is computed at runtime via finite differences: `(pos[t] - pos[t-1]) * CONTROL_HZ`
+- State vector is 25D: `[ee_pos, axis_angle, gripper, wrench, joint_pos, joint_vel]`
+
+### Mismatched State Dimensions
+
+A common error is serving a v3 model but running a v2 client (or vice versa). The state dimension must match between the norm_stats in the checkpoint and the state vector sent by the client:
+
+| Config | norm_stats state dim | Client state dim | `FORCEVLA_USE_JOINTS` |
+|--------|---------------------|-------------------|----------------------|
+| v2 | 13 | 13 | `0` (default) |
+| v3 | 25 | 25 | `1` |
+
 ## Quick Reference
 
 ### Environment Variables
@@ -459,6 +610,9 @@ Both fixes are required for any ForceVLA inference deployment.
 | `XLA_PYTHON_CLIENT_MEM_FRACTION` | JAX GPU memory fraction | `0.75` |
 | `OPENPI_DATA_HOME` | Cache for downloaded checkpoints | `~/.cache/openpi` |
 | `WANDB_API_KEY` | Weights & Biases API key | (none) |
+| `FORCEVLA_USE_JOINTS` | Include joint_pos/joint_vel in state (for v3 models) | `0` |
+| `FORCEVLA_HOST` | ForceVLA inference server host | `localhost` |
+| `FORCEVLA_PORT` | ForceVLA inference server port | `8000` |
 
 ### File Paths
 
