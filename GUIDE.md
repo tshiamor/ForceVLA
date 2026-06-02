@@ -538,11 +538,36 @@ LIMoE's MoE router requires `sequence_length % num_experts == 0`. At batch_size=
 
 Both fixes are required for any ForceVLA inference deployment.
 
-## Inference with Joint State Models (v3)
+## Inference
 
-When serving a v3 model (trained with `use_joint_state=True`), the server expects a 25D state vector instead of 13D. The client must send joint_pos and joint_vel alongside the standard state.
+### Serving v2 (13D state, no joints)
 
-### Serving
+```bash
+cd ~/ForceVLA && conda activate forcevla_eval
+python scripts/serve_policy.py policy:checkpoint \
+    --policy.config forcevla_sfp_all_trimmed_v2 \
+    --policy.dir checkpoints/forcevla_sfp_all_trimmed_v2/sfp_all_trimmed_v2/49999
+```
+
+Client observation dict:
+```python
+obs = {
+    "center_image": np.ndarray((480, 640, 3), dtype=np.uint8),
+    "left_image":   np.ndarray((480, 640, 3), dtype=np.uint8),
+    "right_image":  np.ndarray((480, 640, 3), dtype=np.uint8),
+    "state": np.concatenate([
+        ee_pos,         # (3,) TCP position xyz
+        axis_angle,     # (3,) orientation as axis-angle from quaternion
+        gripper,        # (1,) mean of finger joints
+        wrench,         # (6,) force/torque (Fx,Fy,Fz,Tx,Ty,Tz)
+    ]),  # total: 13D
+    "prompt": "Insert the SFP cable module in SFP_PORT_0 on NIC_CARD at NIC_RAIL_0 in zone 1 section",
+}
+result = client.infer(obs)
+actions = result["actions"]  # (50, 7) — [dx,dy,dz,drx,dry,drz,grip] per step
+```
+
+### Serving v3 (25D state, with joints)
 
 ```bash
 cd ~/ForceVLA && conda activate forcevla_eval
@@ -551,29 +576,50 @@ python scripts/serve_policy.py policy:checkpoint \
     --policy.dir checkpoints/forcevla_sfp_all_trimmed_v3/v3/49999
 ```
 
-### Client State Vector
-
-The client must build a 25D state (not 13D):
-
+Client observation dict — same as v2 but with 25D state:
 ```python
-state = np.concatenate([
-    ee_pos,         # (3,) TCP position
-    axis_angle,     # (3,) from quaternion
-    gripper,        # (1,) mean of finger joints
-    wrench,         # (6,) force/torque
-    joint_pos,      # (6,) joint angles
-    joint_vel,      # (6,) joint velocities
-])  # total: 25D
+obs = {
+    "center_image": ...,
+    "left_image": ...,
+    "right_image": ...,
+    "state": np.concatenate([
+        ee_pos,         # (3,) TCP position xyz
+        axis_angle,     # (3,) orientation as axis-angle
+        gripper,        # (1,) mean of finger joints
+        wrench,         # (6,) force/torque
+        joint_pos,      # (6,) joint angles in radians
+        joint_vel,      # (6,) joint velocities in rad/s
+    ]),  # total: 25D
+    "prompt": "...",
+}
 ```
 
-If the client sends 13D to a 25D server, normalization will fail with:
+If the client sends 13D to a 25D server (or vice versa), normalization will fail:
 ```
 ValueError: operands could not be broadcast together with shapes (13,) (25,)
 ```
 
+### Applying Actions at Inference
+
+The model outputs 7D actions: `[dx, dy, dz, drx, dry, drz, gripper]`. These are per-timestep position and orientation deltas applied to the current TCP pose:
+
+```python
+# Position: add delta to current position
+target_pos = cur_pos + action[:3]
+
+# Orientation: compose rotation delta onto current quaternion
+q_delta = quaternion_from_rotvec(action[3:6])
+target_quat = cur_quat * q_delta
+
+# Send as absolute pose target (MODE_POSITION)
+set_pose_target(position=target_pos, orientation=target_quat)
+```
+
+The control mode must be `MODE_POSITION` (same as CheatCode used during data collection), not `MODE_VELOCITY`. The impedance controller tracks both position and orientation targets.
+
 ### AIC RunForceVLA Policy
 
-The `RunForceVLA` ROS policy supports both modes via the `FORCEVLA_USE_JOINTS` environment variable:
+The `RunForceVLA` ROS policy handles all of this. It supports both v2 and v3 models via the `FORCEVLA_USE_JOINTS` environment variable:
 
 ```bash
 # v2 model (13D state, no joints) — default
@@ -590,14 +636,12 @@ When `FORCEVLA_USE_JOINTS=1`:
 - `joint_vel` is computed at runtime via finite differences: `(pos[t] - pos[t-1]) * CONTROL_HZ`
 - State vector is 25D: `[ee_pos, axis_angle, gripper, wrench, joint_pos, joint_vel]`
 
-### Mismatched State Dimensions
+### Quick Reference: Server + Client Pairing
 
-A common error is serving a v3 model but running a v2 client (or vice versa). The state dimension must match between the norm_stats in the checkpoint and the state vector sent by the client:
-
-| Config | norm_stats state dim | Client state dim | `FORCEVLA_USE_JOINTS` |
-|--------|---------------------|-------------------|----------------------|
-| v2 | 13 | 13 | `0` (default) |
-| v3 | 25 | 25 | `1` |
+| Config | Server config | State dim | `FORCEVLA_USE_JOINTS` |
+|--------|--------------|-----------|----------------------|
+| v2 | `forcevla_sfp_all_trimmed_v2` | 13D | `0` (default) |
+| v3 | `forcevla_sfp_all_trimmed_v3` | 25D | `1` |
 
 ## Quick Reference
 
