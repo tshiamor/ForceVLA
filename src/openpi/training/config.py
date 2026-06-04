@@ -1210,6 +1210,28 @@ _CONFIGS = [
         ema_decay=None,
         batch_size=4,
     ),
+    # sfp_all_trimmed_v4: v3 with stabilization frames trimmed (48% fewer frames)
+    TrainConfig(
+        name="forcevla_sfp_all_trimmed_v4",
+        model=pi0_force.Pi0_GuidanceConfig(
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            action_dim=7,
+            use_joint_state=True,
+        ),
+        data=SfpInsertDataConfig(
+            repo_id="tshiamor/aic_gt_sfp_all_trimmed_v4",
+            base_config=DataConfig(prompt_from_task=True),
+            include_joints=True,
+        ),
+        weight_loader=weight_loaders.Pi0GuidanceWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
+        num_train_steps=50_000,
+        freeze_filter=pi0_force.Pi0_GuidanceConfig(
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        ema_decay=None,
+        batch_size=4,
+    ),
     # pi0 baseline (no force) on same SFP dataset — for comparison with ForceVLA
     TrainConfig(
         name="pi0_sfp_all_nics",
