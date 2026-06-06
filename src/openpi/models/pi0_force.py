@@ -82,6 +82,12 @@ class Pi0_GuidanceConfig(_model.BaseModelConfig):
     # (proprio + wrench) configs leave this False — no architectural change.
     use_joint_state: bool = False
 
+    # Per-dimension loss weights for the action vector. Length must match
+    # action_dim. None = uniform weighting (default pi0 behavior).
+    # Example for 7D SFP actions [dx,dy,dz,drx,dry,drz,grip]:
+    #   loss_weights = (1,1,1, 5,5,5, 1) weights rotation 5x more than position.
+    loss_weights: tuple[float, ...] | None = None
+
     @property
     @override
     def model_type(self) -> _model.ModelType:
@@ -151,6 +157,9 @@ class Pi0_GuidanceConfig(_model.BaseModelConfig):
 class Pi0_Guidance(_model.BaseModel):
     def __init__(self, config: Pi0_GuidanceConfig, rngs: nnx.Rngs):
         super().__init__(config.action_dim, config.action_horizon, config.max_token_len)
+        # Store as a frozen config tuple — not an nnx.Variable or jax array,
+        # so NNX doesn't track it as a parameter and weight loading doesn't break.
+        self._loss_weight_tuple = config.loss_weights
         paligemma_config = _gemma.get_config(config.paligemma_variant)
         action_expert_config = _gemma.get_config(config.action_expert_variant)
         # TODO: rewrite gemma in NNX. For now, use bridge.
@@ -317,7 +326,11 @@ class Pi0_Guidance(_model.BaseModel):
             limoe_input = jnp.pad(limoe_input, ((0, 0), (0, _pad), (0, 0)))
         limoe_out = self.limoe(limoe_input)
         v_t = self.action_out_proj(limoe_out[0][:, _seq - self.action_horizon : _seq] + suffix_out[:, -self.action_horizon :])
-        return jnp.mean(jnp.square(v_t - u_t), axis=-1)
+        sq_err = jnp.square(v_t - u_t)  # (batch, horizon, action_dim)
+        if self._loss_weight_tuple is not None:
+            w = jnp.array(self._loss_weight_tuple, dtype=jnp.float32)
+            sq_err = sq_err * (w / w.mean())
+        return jnp.mean(sq_err, axis=-1)
 
     @override
     def sample_actions(
